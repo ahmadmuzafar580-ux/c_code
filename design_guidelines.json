@@ -1,0 +1,214 @@
+{
+  "app_name": "Famrak",
+  "personality": "1 iOS-Native Clean",
+  "personality_one_liner": "A calm, highly readable, and trustworthy space that puts family safety and location clarity first without feeling overly clinical or intrusive.",
+  "color": {
+    "surface": "#F7F7F6",
+    "onSurface": "#1C1C1E",
+    "surfaceSecondary": "#FFFFFF",
+    "onSurfaceSecondary": "#3A3A3C",
+    "surfaceTertiary": "#EFEFEF",
+    "onSurfaceTertiary": "#636366",
+    "surfaceInverse": "#1C1C1E",
+    "onSurfaceInverse": "#FFFFFF",
+    "brand": "#3A6047",
+    "brandPrimary": "#3A6047",
+    "onBrandPrimary": "#FFFFFF",
+    "brandSecondary": "#84A590",
+    "onBrandSecondary": "#1C1C1E",
+    "brandTertiary": "#E2ECE5",
+    "onBrandTertiary": "#23402E",
+    "success": "#427A5B",
+    "onSuccess": "#FFFFFF",
+    "warning": "#D48C29",
+    "onWarning": "#1C1C1E",
+    "error": "#C75043",
+    "onError": "#FFFFFF",
+    "info": "#636366",
+    "onInfo": "#FFFFFF",
+    "border": "#E5E5EA",
+    "borderStrong": "#C7C7CC",
+    "divider": "#E5E5EA"
+  },
+  "typography": {
+    "displayFontFamily": "Plus Jakarta Sans",
+    "textFontFamily": "Plus Jakarta Sans",
+    "scale": {
+      "sm": 12,
+      "base": 14,
+      "lg": 16,
+      "xl": 20,
+      "2xl": 24
+    }
+  },
+  "spacing": {
+    "rule": "Generous vertical breathing room. Cards use md/lg padding, avoiding flush-to-edge elements unless full-bleed imagery.",
+    "xs": 4,
+    "sm": 8,
+    "md": 12,
+    "lg": 16,
+    "xl": 24,
+    "2xl": 32,
+    "3xl": 48
+  },
+  "radius_tokens": {
+    "sm": 6,
+    "md": 12,
+    "lg": 20,
+    "pill": 999
+  },
+  "shadow_tier": "1",
+  "navigation": "bottom_tabs",
+  "icon_set": "Ionicons",
+  "glassmorphism": {
+    "enabled": true,
+    "do's": [
+      "Floating bottom tab bar must be glass (expo-blur) over the map.",
+      "Top sticky header controls (Check-in, Battery) on the map should use glass backgrounds.",
+      "Bottom-sheet drag handles and headers."
+    ],
+    "dont's": [
+      "Do not use glass for list rows or standard cards on non-map screens.",
+      "Do not use glass for text input fields."
+    ]
+  },
+  "platform_libraries": {
+    "glass": {
+      "ios": "expo-glass-effect",
+      "android": "expo-blur",
+      "low_end_android_fallback": "solid surfaceSecondary"
+    },
+    "image": "expo-image",
+    "blur": "expo-blur",
+    "bottom_sheet": "@gorhom/bottom-sheet",
+    "animation": "react-native-reanimated",
+    "gesture": "react-native-gesture-handler"
+  },
+  "screens": [
+    {
+      "name": "Auth",
+      "purpose": "Secure entry point emphasizing family connection.",
+      "states": {
+        "loading": "Spinner over brand logo.",
+        "empty": "N/A",
+        "error": "Inline text below fields using error color."
+      },
+      "layout": "Top 40% uses 'onboarding_family' image with a vertical gradient scrim (transparent to surface). Bottom 60% is a solid surface card containing clean single-column inputs and a sticky brandPrimary CTA at the bottom."
+    },
+    {
+      "name": "Home Map",
+      "purpose": "Live tracking overview of all family members.",
+      "states": {
+        "loading": "Skeleton map grid or spinner in the center.",
+        "empty": "Map shows current user only with 'Invite Family' CTA.",
+        "error": "Banner at the top: 'Unable to update location. Retry'."
+      },
+      "layout": "Full-bleed map (flex: 1). Floating glass tab bar at the bottom (inset 20pt from left/right/bottom). Top safe-area features a glass header with User profile left, 'Check In' chip center, and floating SOS FAB (error color) above the tab bar."
+    },
+    {
+      "name": "Family List",
+      "purpose": "Quick scan of member statuses (battery, location, last seen).",
+      "states": {
+        "loading": "List of skeleton rows.",
+        "empty": "Illustration + 'No members yet. Send an invite!'",
+        "error": "Readable message + Retry button."
+      },
+      "layout": "Standard iOS list view. Each row uses surfaceSecondary, avatar on the left, Name and Status text, and a right-aligned battery indicator. Generous md padding between rows."
+    },
+    {
+      "name": "Chat",
+      "purpose": "Real-time communication for the family circle.",
+      "states": {
+        "loading": "Spinner in center.",
+        "empty": "Empty abstract background + 'Start the conversation'.",
+        "error": "Failed to send red (!) icon next to message."
+      },
+      "layout": "Standard native chat. Messages from user are brandPrimary. Messages from others are surfaceTertiary. Input field fixed above keyboard with KeyboardAvoidingView."
+    },
+    {
+      "name": "Places/Geofences",
+      "purpose": "Manage safe zones like Home or School and notification rules.",
+      "states": {
+        "loading": "Skeleton cards.",
+        "empty": "'empty_history' image + 'Add a safe zone'.",
+        "error": "Failed to load places banner."
+      },
+      "layout": "Grid or vertical list of large cards. Each card uses an image backdrop (place_home, place_school) with a top-to-bottom gradient scrim and white text on the bottom. CTA 'Add Place' sticky at bottom."
+    },
+    {
+      "name": "Location history",
+      "purpose": "Timeline of a specific member's movements.",
+      "states": {
+        "loading": "Skeleton timeline.",
+        "empty": "'empty_history' image + 'No location data for today'.",
+        "error": "Failed to load timeline."
+      },
+      "layout": "Vertical timeline layout. Left side has a subtle vertical line with brandPrimary dots. Right side contains surfaceSecondary cards detailing time, address, and activity (e.g., 'Driving')."
+    },
+    {
+      "name": "SOS Confirmation",
+      "purpose": "Prevent accidental triggers while ensuring emergency access.",
+      "states": {
+        "loading": "N/A",
+        "empty": "N/A",
+        "error": "N/A"
+      },
+      "layout": "Full-screen modal overlay in surfaceInverse or heavy error tint. Contains a large, oversized 'Swipe to SOS' or 'Hold to SOS' slider to avoid accidental taps. High contrast, large typography."
+    },
+    {
+      "name": "Invite",
+      "purpose": "Easily onboard new members to the family circle.",
+      "states": {
+        "loading": "Spinner on QR.",
+        "empty": "N/A",
+        "error": "N/A"
+      },
+      "layout": "Centered layout. Large QR code in the middle inside a surfaceSecondary card with heavy shadow_tier 1. Large prominent 'Share Code' CTA pinned to the bottom."
+    }
+  ],
+  "images": {
+    "avatar_mom": {
+      "url": "https://images.unsplash.com/photo-1570657891791-e39a9d185540?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1NzR8MHwxfHNlYXJjaHwxfHxwb3J0cmFpdCUyMHNtaWxpbmclMjBtb3RoZXIlMjBwaG90b3xlbnwwfHx8fDE3ODM0MDc4NjJ8MA&ixlib=rb-4.1.0&q=85",
+      "alt": "Portrait of smiling mother"
+    },
+    "avatar_boy": {
+      "url": "https://images.unsplash.com/photo-1547222220-069507723741?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2NzR8MHwxfHNlYXJjaHwxfHxwb3J0cmFpdCUyMHRlZW5hZ2UlMjBib3klMjBzbWlsaW5nJTIwcGhvdG98ZW58MHx8fHwxNzgzNDA3ODYyfDA&ixlib=rb-4.1.0&q=85",
+      "alt": "Portrait of teenage boy"
+    },
+    "avatar_dad": {
+      "url": "https://images.unsplash.com/photo-1564156280315-1d42b4651629?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDQ2NDJ8MHwxfHNlYXJjaHwxfHxwb3J0cmFpdCUyMHNtaWxpbmclMjBmYXRoZXIlMjBwaG90b3xlbnwwfHx8fDE3ODM0MDc4NjJ8MA&ixlib=rb-4.1.0&q=85",
+      "alt": "Portrait of smiling father"
+    },
+    "place_home": {
+      "url": "https://images.pexels.com/photos/323780/pexels-photo-323780.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+      "alt": "Modern house exterior"
+    },
+    "place_school": {
+      "url": "https://images.pexels.com/photos/17144608/pexels-photo-17144608.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+      "alt": "School building exterior"
+    },
+    "onboarding_family": {
+      "url": "https://images.unsplash.com/photo-1561049527-9743861dce35?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1NzB8MHwxfHNlYXJjaHwxfHxmYW1pbHklMjB3YWxraW5nJTIwaW4lMjBwYXJrJTIwc3VubnklMjBkYXl8ZW58MHx8fHwxNzgzNDA3ODY5fDA&ixlib=rb-4.1.0&q=85",
+      "alt": "Family walking in park"
+    },
+    "empty_history": {
+      "url": "https://images.pexels.com/photos/12961119/pexels-photo-12961119.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+      "alt": "Abstract minimalist background"
+    }
+  },
+  "haptics": {
+    "tab_press": "light",
+    "check_in_success": "success",
+    "sos_trigger": "heavy",
+    "button_press": "light"
+  },
+  "instructions_to_main_agent": [
+    "Strictly follow the color palette. Do NOT use default Material or iOS blues for links, active tabs, or icons. The brand color is Sage Green.",
+    "Implement the bottom tab bar as a floating, pill-shaped 'Liquid Glass' container inset from the edges (approx 20pt) rather than a full-width bottom block. This matches the modern Find My / Life360 patterns discovered in research.",
+    "Apply gradient-to-dark scrim overlays on all image cards (e.g., Places) to ensure text readability.",
+    "For the SOS Screen, build an aggressive full-screen modal with a 'Swipe to Trigger' or 'Hold' interaction. Prevent accidental taps at all costs.",
+    "Ensure map pins use the provided avatar images wrapped in a white border with a shadow for clear map visibility.",
+    "Every sticky primary button (like 'Save' or 'Share Code') must be anchored at the bottom with proper SafeAreaView padding, avoiding content overlap.",
+    "When integrating haptics, tie 'success' to check-in completion, and 'heavy' to the SOS slider."
+  ]
+}
