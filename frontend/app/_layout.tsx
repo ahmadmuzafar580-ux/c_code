@@ -47,6 +47,9 @@ export default function RootLayout() {
             <Stack.Screen name="onboarding" />
             <Stack.Screen name="(tabs)" />
             <Stack.Screen name="invite" options={{ presentation: "modal" }} />
+            <Stack.Screen name="family-requests" options={{ presentation: "modal" }} />
+            <Stack.Screen name="privacy" options={{ presentation: "modal" }} />
+            <Stack.Screen name="terms" options={{ presentation: "modal" }} />
             <Stack.Screen name="sos" options={{ presentation: "fullScreenModal", animation: "fade" }} />
             <Stack.Screen name="add-place" options={{ presentation: "modal" }} />
             <Stack.Screen name="places-list" />

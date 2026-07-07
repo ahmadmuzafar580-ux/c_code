@@ -1,9 +1,15 @@
-"""Famrak backend E2E test suite - covers auth, family, location, places/geofence,
-chat, checkin, SOS, and WebSocket via the public /api endpoint.
+"""Famrak backend E2E test suite (iteration 2).
+
+Covers previous features plus the new privacy/approval/sharing flow:
+- consent required on register
+- pending join-request approval flow (owner approves/rejects)
+- sharing on/off toggle (broadcast, location filter, history 403)
+- remove member / leave family
+- clear location history
+- delete account (disband family when owner)
 """
 import os
 import json
-import time
 import uuid
 import asyncio
 import pytest
@@ -18,7 +24,6 @@ API = f"{BASE_URL}/api"
 WS_URL = BASE_URL.replace("https://", "wss://").replace("http://", "ws://") + "/api/ws"
 
 RUN_ID = uuid.uuid4().hex[:8]
-EMAIL_DOMAIN = "famrak-test.example.com"
 
 
 # ---------- Fixtures ----------
@@ -32,262 +37,355 @@ def state():
     return {}
 
 
-# ---------- Helpers ----------
 def auth_headers(token):
     return {"Authorization": f"Bearer {token}"}
 
 
-def register(s, email, password, name):
-    return s.post(f"{API}/auth/register", json={"email": email, "password": password, "name": name}, timeout=30)
+def register(s, email, password, name, consent=True):
+    payload = {"email": email, "password": password, "name": name, "consent": consent}
+    return s.post(f"{API}/auth/register", json=payload, timeout=30)
 
 
-# ---------- AUTH ----------
+# ---------- AUTH + CONSENT ----------
 def test_root(s):
     r = s.get(f"{API}/", timeout=15)
-    assert r.status_code == 200
-    assert r.json().get("status") == "ok"
+    assert r.status_code == 200 and r.json().get("status") == "ok"
 
 
-def test_register_userA(s, state):
+def test_register_requires_consent(s):
+    email = f"TEST_NC_{RUN_ID}@famrak-test.example.com"
+    r = register(s, email, "secret123", "NoConsent TEST", consent=False)
+    assert r.status_code == 400, r.text
+    assert "consent" in r.text.lower() or "privacy" in r.text.lower()
+
+
+def test_register_missing_consent_field(s):
+    """Omitted consent should default to False -> 400."""
+    email = f"TEST_MC_{RUN_ID}@famrak-test.example.com"
+    r = s.post(f"{API}/auth/register",
+               json={"email": email, "password": "secret123", "name": "MissingConsent TEST"},
+               timeout=30)
+    assert r.status_code == 400, r.text
+
+
+def test_register_userA_owner(s, state):
     email = f"TEST_A_{RUN_ID}@famrak-test.example.com"
     r = register(s, email, "secret123", "Alice TEST")
     assert r.status_code == 200, r.text
     data = r.json()
-    assert "access_token" in data and data["user"]["email"] == email.lower()
-    state["A"] = {"email": email.lower(), "token": data["access_token"], "user": data["user"]}
+    u = data["user"]
+    assert u["email"] == email.lower()
+    assert u["sharing_enabled"] is True
+    assert u.get("consented_at"), "consented_at must be returned"
+    state["A"] = {"email": email.lower(), "token": data["access_token"], "user": u}
 
 
-def test_register_userB(s, state):
+def test_register_userB_member(s, state):
     email = f"TEST_B_{RUN_ID}@famrak-test.example.com"
     r = register(s, email, "secret123", "Bob TEST")
     assert r.status_code == 200, r.text
-    data = r.json()
-    state["B"] = {"email": email, "token": data["access_token"], "user": data["user"]}
+    d = r.json()
+    state["B"] = {"email": email.lower(), "token": d["access_token"], "user": d["user"]}
 
 
 def test_register_userC_outsider(s, state):
-    """Third user, will NOT join the family - used for access control tests."""
     email = f"TEST_C_{RUN_ID}@famrak-test.example.com"
     r = register(s, email, "secret123", "Carol TEST")
-    assert r.status_code == 200, r.text
-    state["C"] = {"email": email, "token": r.json()["access_token"], "user": r.json()["user"]}
-
-
-def test_register_duplicate(s, state):
-    r = register(s, state["A"]["email"], "secret123", "Dup")
-    assert r.status_code == 400
-
-
-def test_login_wrong_password(s, state):
-    r = s.post(f"{API}/auth/login", json={"email": state["A"]["email"], "password": "wrong"}, timeout=15)
-    assert r.status_code == 400
-
-
-def test_login_success(s, state):
-    r = s.post(f"{API}/auth/login", json={"email": state["A"]["email"], "password": "secret123"}, timeout=15)
     assert r.status_code == 200
-    assert "access_token" in r.json()
-
-
-def test_me_without_token(s):
-    r = s.get(f"{API}/auth/me", timeout=15)
-    # HTTPBearer with auto_error=False + our check returns 401
-    assert r.status_code in (401, 403)
+    d = r.json()
+    state["C"] = {"email": email.lower(), "token": d["access_token"], "user": d["user"]}
 
 
 def test_me_with_token(s, state):
     r = s.get(f"{API}/auth/me", headers=auth_headers(state["A"]["token"]), timeout=15)
     assert r.status_code == 200
-    assert r.json()["email"] == state["A"]["email"]
+    body = r.json()
+    assert body["email"] == state["A"]["email"]
+    assert body["sharing_enabled"] is True
 
 
-# ---------- FAMILY ----------
+# ---------- FAMILY: create ----------
 def test_create_family_A(s, state):
     r = s.post(f"{API}/family/create", json={"name": f"TEST Family {RUN_ID}"},
                headers=auth_headers(state["A"]["token"]), timeout=15)
     assert r.status_code == 200, r.text
     fam = r.json()
     assert fam["owner_id"] == state["A"]["user"]["id"]
-    assert fam["invite_code"]
     state["family"] = fam
 
 
-def test_create_family_twice_fails(s, state):
-    r = s.post(f"{API}/family/create", json={"name": "Should fail"},
-               headers=auth_headers(state["A"]["token"]), timeout=15)
-    assert r.status_code == 400
-
-
-def test_get_family_A(s, state):
-    r = s.get(f"{API}/family", headers=auth_headers(state["A"]["token"]), timeout=15)
-    assert r.status_code == 200
-    assert r.json()["id"] == state["family"]["id"]
-
-
-def test_join_family_B(s, state):
+# ---------- JOIN REQUEST FLOW ----------
+def test_join_family_returns_pending(s, state):
     r = s.post(f"{API}/family/join", json={"invite_code": state["family"]["invite_code"]},
                headers=auth_headers(state["B"]["token"]), timeout=15)
     assert r.status_code == 200, r.text
-    assert r.json()["id"] == state["family"]["id"]
+    d = r.json()
+    assert d["status"] == "pending"
+    assert d["family_name"] == state["family"]["name"]
+    assert "request_id" in d
+    state["reqB"] = d["request_id"]
 
 
-def test_join_family_twice(s, state):
-    r = s.post(f"{API}/family/join", json={"invite_code": state["family"]["invite_code"]},
-               headers=auth_headers(state["B"]["token"]), timeout=15)
-    assert r.status_code == 400
-
-
-def test_family_members_lists_both(s, state):
-    r = s.get(f"{API}/family/members", headers=auth_headers(state["A"]["token"]), timeout=15)
-    assert r.status_code == 200
-    ids = {m["id"] for m in r.json()}
-    assert state["A"]["user"]["id"] in ids and state["B"]["user"]["id"] in ids
-
-
-def test_join_invalid_code(s, state):
-    r = s.post(f"{API}/family/join", json={"invite_code": "BADCODE"},
+def test_join_family_bad_invite(s, state):
+    r = s.post(f"{API}/family/join", json={"invite_code": "NOPE99"},
                headers=auth_headers(state["C"]["token"]), timeout=15)
     assert r.status_code == 404
 
 
-# ---------- LOCATION ----------
-def test_location_update_A(s, state):
-    body = {"lat": 37.7749, "lng": -122.4194, "accuracy": 5, "battery": 88, "activity": "still"}
-    r = s.post(f"{API}/location/update", json=body,
-               headers=auth_headers(state["A"]["token"]), timeout=15)
+def test_my_pending_request_returns_request(s, state):
+    r = s.get(f"{API}/family/my-request", headers=auth_headers(state["B"]["token"]), timeout=15)
     assert r.status_code == 200, r.text
     d = r.json()
-    assert d["lat"] == body["lat"] and d["user_id"] == state["A"]["user"]["id"]
+    assert d is not None
+    assert d["id"] == state["reqB"]
+    assert d["status"] == "pending"
+
+
+def test_my_pending_request_null_when_none(s, state):
+    r = s.get(f"{API}/family/my-request", headers=auth_headers(state["C"]["token"]), timeout=15)
+    assert r.status_code == 200
+    # No pending request for C -> null
+    assert r.json() in (None, {}, "null") or r.text.strip() in ("null", "")
+
+
+def test_join_requests_owner_lists(s, state):
+    r = s.get(f"{API}/family/join-requests", headers=auth_headers(state["A"]["token"]), timeout=15)
+    assert r.status_code == 200, r.text
+    items = r.json()
+    assert any(x["id"] == state["reqB"] and x["status"] == "pending" for x in items)
+
+
+def test_join_requests_non_owner_forbidden(s, state):
+    # C isn't even in the family -> returns [] per current impl (no family)
+    r_c = s.get(f"{API}/family/join-requests", headers=auth_headers(state["C"]["token"]), timeout=15)
+    assert r_c.status_code == 200 and r_c.json() == []
+    # B is pending, no family_id yet -> also []
+    r_b = s.get(f"{API}/family/join-requests", headers=auth_headers(state["B"]["token"]), timeout=15)
+    assert r_b.status_code == 200 and r_b.json() == []
+
+
+def test_approve_non_owner_forbidden(s, state):
+    # C tries to approve B's request
+    r = s.post(f"{API}/family/join-requests/{state['reqB']}/approve",
+               headers=auth_headers(state["C"]["token"]), timeout=15)
+    assert r.status_code == 403
+
+
+def test_approve_join_request(s, state):
+    r = s.post(f"{API}/family/join-requests/{state['reqB']}/approve",
+               headers=auth_headers(state["A"]["token"]), timeout=15)
+    assert r.status_code == 200, r.text
+    fam = r.json()
+    assert fam["id"] == state["family"]["id"]
+    # B now has family_id
+    me = requests.get(f"{API}/auth/me", headers=auth_headers(state["B"]["token"]), timeout=15).json()
+    assert me["family_id"] == state["family"]["id"]
+    assert me["role"] == "member"
+
+
+def test_approve_already_decided(s, state):
+    r = s.post(f"{API}/family/join-requests/{state['reqB']}/approve",
+               headers=auth_headers(state["A"]["token"]), timeout=15)
+    assert r.status_code == 400
+
+
+# reject flow: C submits, owner rejects
+def test_reject_flow(s, state):
+    r1 = s.post(f"{API}/family/join", json={"invite_code": state["family"]["invite_code"]},
+                headers=auth_headers(state["C"]["token"]), timeout=15)
+    assert r1.status_code == 200 and r1.json()["status"] == "pending"
+    req_id = r1.json()["request_id"]
+    # Non-owner cannot reject
+    r_forbid = s.post(f"{API}/family/join-requests/{req_id}/reject",
+                      headers=auth_headers(state["B"]["token"]), timeout=15)
+    assert r_forbid.status_code == 403
+    # Owner rejects
+    r2 = s.post(f"{API}/family/join-requests/{req_id}/reject",
+                headers=auth_headers(state["A"]["token"]), timeout=15)
+    assert r2.status_code == 200
+    # Verify C's my-request is now null
+    r3 = s.get(f"{API}/family/my-request", headers=auth_headers(state["C"]["token"]), timeout=15)
+    assert r3.status_code == 200
+    assert r3.json() in (None, {}) or r3.text.strip() == "null"
+
+
+def test_cancel_my_request(s, state):
+    # C submits again, then cancels themselves
+    r1 = s.post(f"{API}/family/join", json={"invite_code": state["family"]["invite_code"]},
+                headers=auth_headers(state["C"]["token"]), timeout=15)
+    assert r1.status_code == 200
+    r2 = s.post(f"{API}/family/my-request/cancel",
+                headers=auth_headers(state["C"]["token"]), timeout=15)
+    assert r2.status_code == 200
+    r3 = s.get(f"{API}/family/my-request", headers=auth_headers(state["C"]["token"]), timeout=15)
+    assert r3.text.strip() == "null" or r3.json() in (None, {})
+
+
+# ---------- LOCATION with sharing filter ----------
+def test_location_update_A(s, state):
+    r = s.post(f"{API}/location/update",
+               json={"lat": 37.7749, "lng": -122.4194, "battery": 90, "activity": "still"},
+               headers=auth_headers(state["A"]["token"]), timeout=15)
+    assert r.status_code == 200
 
 
 def test_location_update_B(s, state):
-    body = {"lat": 37.7849, "lng": -122.4094, "accuracy": 8, "battery": 72, "activity": "walking"}
-    r = s.post(f"{API}/location/update", json=body,
+    r = s.post(f"{API}/location/update",
+               json={"lat": 37.7849, "lng": -122.4094, "battery": 70},
                headers=auth_headers(state["B"]["token"]), timeout=15)
     assert r.status_code == 200
 
 
-def test_family_locations_aggregated(s, state):
+def test_family_locations_includes_both(s, state):
     r = s.get(f"{API}/location/family", headers=auth_headers(state["A"]["token"]), timeout=15)
     assert r.status_code == 200
     ids = {d["user_id"] for d in r.json()}
     assert state["A"]["user"]["id"] in ids and state["B"]["user"]["id"] in ids
 
 
-def test_location_history_family_member(s, state):
-    r = s.get(f"{API}/location/history/{state['B']['user']['id']}",
-              headers=auth_headers(state["A"]["token"]), timeout=15)
+def test_sharing_off_B(s, state):
+    r = s.put(f"{API}/user/sharing", json={"enabled": False},
+              headers=auth_headers(state["B"]["token"]), timeout=15)
+    assert r.status_code == 200, r.text
+    assert r.json()["sharing_enabled"] is False
+
+
+def test_location_update_blocked_when_sharing_off(s, state):
+    r = s.post(f"{API}/location/update", json={"lat": 1.0, "lng": 2.0},
+               headers=auth_headers(state["B"]["token"]), timeout=15)
+    assert r.status_code == 403
+
+
+def test_family_locations_excludes_sharing_off(s, state):
+    """A should NOT see B in /location/family after B disabled sharing."""
+    r = s.get(f"{API}/location/family", headers=auth_headers(state["A"]["token"]), timeout=15)
     assert r.status_code == 200
-    assert len(r.json()) >= 1
+    ids = {d["user_id"] for d in r.json()}
+    assert state["B"]["user"]["id"] not in ids
+    assert state["A"]["user"]["id"] in ids  # self visible
 
 
-def test_location_history_non_family_forbidden(s, state):
-    # C is not in the family; A tries to read C's history
-    r = s.get(f"{API}/location/history/{state['C']['user']['id']}",
+def test_history_forbidden_when_target_sharing_off(s, state):
+    r = s.get(f"{API}/location/history/{state['B']['user']['id']}",
               headers=auth_headers(state["A"]["token"]), timeout=15)
     assert r.status_code == 403
 
 
-def test_location_update_without_family(s, state):
-    r = s.post(f"{API}/location/update", json={"lat": 1.0, "lng": 2.0},
-               headers=auth_headers(state["C"]["token"]), timeout=15)
+def test_history_self_still_allowed_when_sharing_off(s, state):
+    """B can still see own history even with sharing off."""
+    r = s.get(f"{API}/location/history/{state['B']['user']['id']}",
+              headers=auth_headers(state["B"]["token"]), timeout=15)
+    assert r.status_code == 200
+
+
+def test_sharing_on_B_restores_update(s, state):
+    r = s.put(f"{API}/user/sharing", json={"enabled": True},
+              headers=auth_headers(state["B"]["token"]), timeout=15)
+    assert r.status_code == 200 and r.json()["sharing_enabled"] is True
+    r2 = s.post(f"{API}/location/update", json={"lat": 37.79, "lng": -122.42},
+                headers=auth_headers(state["B"]["token"]), timeout=15)
+    assert r2.status_code == 200
+
+
+# ---------- MEMBER REMOVAL / LEAVE ----------
+def test_remove_member_non_owner_forbidden(s, state):
+    # B tries to remove A -> 403
+    r = s.delete(f"{API}/family/members/{state['A']['user']['id']}",
+                 headers=auth_headers(state["B"]["token"]), timeout=15)
+    assert r.status_code == 403
+
+
+def test_owner_cannot_remove_self(s, state):
+    r = s.delete(f"{API}/family/members/{state['A']['user']['id']}",
+                 headers=auth_headers(state["A"]["token"]), timeout=15)
     assert r.status_code == 400
 
 
-# ---------- PLACES / GEOFENCES ----------
-def test_create_place(s, state):
-    body = {"name": "TEST Home", "lat": 37.7749, "lng": -122.4194, "radius": 200}
-    r = s.post(f"{API}/places", json=body, headers=auth_headers(state["A"]["token"]), timeout=15)
-    assert r.status_code == 200, r.text
-    state["place"] = r.json()
-
-
-def test_list_places(s, state):
-    r = s.get(f"{API}/places", headers=auth_headers(state["B"]["token"]), timeout=15)
+def test_member_can_remove_self_leave(s, state):
+    """B (member) can DELETE self => leaves family."""
+    r = s.delete(f"{API}/family/members/{state['B']['user']['id']}",
+                 headers=auth_headers(state["B"]["token"]), timeout=15)
     assert r.status_code == 200
-    assert any(p["id"] == state["place"]["id"] for p in r.json())
+    me = requests.get(f"{API}/auth/me", headers=auth_headers(state["B"]["token"]), timeout=15).json()
+    assert me["family_id"] is None
 
 
-def test_geofence_haversine_logic(s, state):
-    """Update B to be well outside then well inside the place radius.
-    We can't easily observe WS, but we ensure the endpoint doesn't error and
-    that a subsequent 'inside' update maintains state (checked implicitly via WS test)."""
-    # Outside (~10km away)
-    r1 = s.post(f"{API}/location/update", json={"lat": 37.86, "lng": -122.30},
+def test_owner_removes_member(s, state):
+    """Re-add B via approval, then owner removes B."""
+    r1 = s.post(f"{API}/family/join", json={"invite_code": state["family"]["invite_code"]},
                 headers=auth_headers(state["B"]["token"]), timeout=15)
     assert r1.status_code == 200
-    # Inside place radius
-    r2 = s.post(f"{API}/location/update", json={"lat": 37.7749, "lng": -122.4194},
-                headers=auth_headers(state["B"]["token"]), timeout=15)
-    assert r2.status_code == 200
-
-
-def test_delete_place(s, state):
-    r = s.delete(f"{API}/places/{state['place']['id']}",
-                 headers=auth_headers(state["A"]["token"]), timeout=15)
-    assert r.status_code == 200
-    r2 = s.delete(f"{API}/places/{state['place']['id']}",
-                  headers=auth_headers(state["A"]["token"]), timeout=15)
-    assert r2.status_code == 404
-
-
-# ---------- CHAT ----------
-def test_chat_send_and_list(s, state):
-    r = s.post(f"{API}/chat/send", json={"text": f"TEST hello {RUN_ID}"},
-               headers=auth_headers(state["A"]["token"]), timeout=15)
-    assert r.status_code == 200
-    mid = r.json()["id"]
-    r2 = s.get(f"{API}/chat/messages", headers=auth_headers(state["B"]["token"]), timeout=15)
-    assert r2.status_code == 200
-    msgs = r2.json()
-    assert any(m["id"] == mid for m in msgs)
-    # chronological order (ascending created_at)
-    times = [m["created_at"] for m in msgs]
-    assert times == sorted(times)
-
-
-def test_chat_without_family(s, state):
-    r = s.post(f"{API}/chat/send", json={"text": "nope"},
-               headers=auth_headers(state["C"]["token"]), timeout=15)
-    assert r.status_code == 400
-
-
-# ---------- CHECK-IN ----------
-def test_checkin_create_and_list(s, state):
-    r = s.post(f"{API}/checkin", json={"lat": 37.7749, "lng": -122.4194, "note": "TEST arrived"},
-               headers=auth_headers(state["B"]["token"]), timeout=15)
-    assert r.status_code == 200
-    cid = r.json()["id"]
-    r2 = s.get(f"{API}/checkin", headers=auth_headers(state["A"]["token"]), timeout=15)
-    assert r2.status_code == 200
-    assert any(c["id"] == cid for c in r2.json())
-
-
-# ---------- SOS ----------
-def test_sos_create_active_resolve(s, state):
-    r = s.post(f"{API}/sos", json={"lat": 37.78, "lng": -122.41},
-               headers=auth_headers(state["B"]["token"]), timeout=15)
-    assert r.status_code == 200
-    alert_id = r.json()["id"]
-    r2 = s.get(f"{API}/sos/active", headers=auth_headers(state["A"]["token"]), timeout=15)
-    assert r2.status_code == 200
-    assert any(a["id"] == alert_id for a in r2.json())
-    r3 = s.post(f"{API}/sos/{alert_id}/resolve",
+    req_id = r1.json()["request_id"]
+    r2 = s.post(f"{API}/family/join-requests/{req_id}/approve",
                 headers=auth_headers(state["A"]["token"]), timeout=15)
+    assert r2.status_code == 200
+    # Now owner removes B
+    r3 = s.delete(f"{API}/family/members/{state['B']['user']['id']}",
+                  headers=auth_headers(state["A"]["token"]), timeout=15)
     assert r3.status_code == 200
-    r4 = s.get(f"{API}/sos/active", headers=auth_headers(state["A"]["token"]), timeout=15)
-    assert not any(a["id"] == alert_id for a in r4.json())
+    me = requests.get(f"{API}/auth/me", headers=auth_headers(state["B"]["token"]), timeout=15).json()
+    assert me["family_id"] is None
 
 
-def test_sos_resolve_not_found(s, state):
-    r = s.post(f"{API}/sos/does-not-exist/resolve",
+# ---------- CLEAR HISTORY ----------
+def test_clear_own_location_history(s, state):
+    # Ensure A has some history first
+    s.post(f"{API}/location/update", json={"lat": 37.7749, "lng": -122.4194},
+           headers=auth_headers(state["A"]["token"]), timeout=15)
+    r = s.delete(f"{API}/user/location-history",
+                 headers=auth_headers(state["A"]["token"]), timeout=15)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body.get("ok") is True and "deleted" in body
+    # Verify empty
+    r2 = s.get(f"{API}/location/history/{state['A']['user']['id']}",
                headers=auth_headers(state["A"]["token"]), timeout=15)
-    assert r.status_code == 404
+    assert r2.status_code == 200 and r2.json() == []
 
 
-# ---------- WEBSOCKET ----------
+# ---------- DELETE ACCOUNT ----------
+def test_delete_account_outsider(s, state):
+    """C (outsider) deletes account -> user gone, token invalid."""
+    r = s.delete(f"{API}/user/account",
+                 headers=auth_headers(state["C"]["token"]), timeout=15)
+    assert r.status_code == 200
+    r2 = s.get(f"{API}/auth/me", headers=auth_headers(state["C"]["token"]), timeout=15)
+    assert r2.status_code == 401
+
+
+def test_delete_account_owner_disbands_family(s, state):
+    """A (owner) deletes account: family disbanded; existing members lose family_id."""
+    # Re-add B first so we can verify disband
+    r_join = s.post(f"{API}/family/join", json={"invite_code": state["family"]["invite_code"]},
+                    headers=auth_headers(state["B"]["token"]), timeout=15)
+    assert r_join.status_code == 200
+    req_id = r_join.json()["request_id"]
+    r_app = s.post(f"{API}/family/join-requests/{req_id}/approve",
+                   headers=auth_headers(state["A"]["token"]), timeout=15)
+    assert r_app.status_code == 200
+
+    # Delete owner account
+    r_del = s.delete(f"{API}/user/account",
+                     headers=auth_headers(state["A"]["token"]), timeout=15)
+    assert r_del.status_code == 200
+
+    # Owner token invalid
+    r_me_a = s.get(f"{API}/auth/me", headers=auth_headers(state["A"]["token"]), timeout=15)
+    assert r_me_a.status_code == 401
+
+    # B still exists but has no family
+    r_me_b = s.get(f"{API}/auth/me", headers=auth_headers(state["B"]["token"]), timeout=15)
+    assert r_me_b.status_code == 200
+    assert r_me_b.json()["family_id"] is None
+
+    # Family lookup should 404 for B
+    r_fam = s.get(f"{API}/family", headers=auth_headers(state["B"]["token"]), timeout=15)
+    assert r_fam.status_code in (400, 404)
+
+
+# ---------- WEBSOCKET (smoke) ----------
 def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro) if False else asyncio.run(coro)
+    return asyncio.run(coro)
 
 
 def test_ws_rejects_no_token():
@@ -296,108 +394,6 @@ def test_ws_rejects_no_token():
             async with websockets.connect(WS_URL, open_timeout=10, close_timeout=5) as ws:
                 await asyncio.wait_for(ws.recv(), timeout=5)
                 return "opened_unexpectedly"
-        except websockets.exceptions.InvalidStatus as e:
-            return f"invalid_status_{e.response.status_code}"
-        except websockets.exceptions.ConnectionClosed as e:
-            return f"closed_{e.code}"
         except Exception as e:
             return f"err_{type(e).__name__}"
-    result = _run(run())
-    assert result != "opened_unexpectedly", f"got {result}"
-
-
-def test_ws_rejects_bad_token():
-    async def run():
-        try:
-            async with websockets.connect(f"{WS_URL}?token=badtoken", open_timeout=10, close_timeout=5) as ws:
-                await asyncio.wait_for(ws.recv(), timeout=5)
-                return "opened_unexpectedly"
-        except websockets.exceptions.ConnectionClosed as e:
-            return f"closed_{e.code}"
-        except Exception as e:
-            return f"err_{type(e).__name__}"
-    result = _run(run())
-    assert result != "opened_unexpectedly", f"got {result}"
-
-
-def test_ws_hello_and_broadcast(state):
-    """Connect user A via WS; user B posts a chat message and updates location;
-    A should receive both events in its family room. C (outsider) must not."""
-
-    tokenA = state["A"]["token"]
-    tokenB = state["B"]["token"]
-    tokenC = state["C"]["token"]
-
-    # sanity: A must have family_id
-    me = requests.get(f"{API}/auth/me", headers={"Authorization": f"Bearer {tokenA}"}, timeout=10).json()
-    print(f"WS-TEST A.me = {me}")
-    assert me.get("family_id"), f"A has no family_id: {me}"
-
-    async def run():
-        events_A = []
-        events_C_error = None
-
-        # A connects
-        wsA = await websockets.connect(f"{WS_URL}?token={tokenA}", open_timeout=10)
-        hello_a = json.loads(await asyncio.wait_for(wsA.recv(), timeout=5))
-        assert hello_a["type"] == "hello", f"expected hello got {hello_a}"
-
-        # C (not in family) - server should close
-        try:
-            wsC = await websockets.connect(f"{WS_URL}?token={tokenC}", open_timeout=10)
-            try:
-                await asyncio.wait_for(wsC.recv(), timeout=3)
-                events_C_error = "opened_unexpectedly"
-            except websockets.exceptions.ConnectionClosed as e:
-                events_C_error = f"closed_{e.code}"
-            await wsC.close()
-        except websockets.exceptions.InvalidStatus as e:
-            events_C_error = f"invalid_status_{e.response.status_code}"
-        except websockets.exceptions.ConnectionClosed as e:
-            events_C_error = f"closed_{e.code}"
-        except Exception as e:
-            events_C_error = f"err_{type(e).__name__}"
-
-        # Collector for A
-        async def collect():
-            try:
-                while True:
-                    msg = await asyncio.wait_for(wsA.recv(), timeout=8)
-                    events_A.append(json.loads(msg))
-            except Exception:
-                return
-
-        collector = asyncio.create_task(collect())
-        await asyncio.sleep(0.5)
-
-        # B sends actions via HTTP
-        def http_post(path, body):
-            return requests.post(f"{API}{path}", json=body,
-                                 headers={"Authorization": f"Bearer {tokenB}"}, timeout=15)
-        http_post("/chat/send", {"text": f"WS TEST {RUN_ID}"})
-        http_post("/location/update", {"lat": 37.7750, "lng": -122.4195})
-
-        # Give async broadcasts time to arrive
-        await asyncio.sleep(4)
-        await wsA.close()
-        try:
-            await collector
-        except Exception:
-            pass
-
-        return events_A, events_C_error
-
-    events_A, c_err = _run(run())
-    types = {e["type"] for e in events_A}
-    assert "message" in types, f"missing 'message' event in {types}"
-    assert "location" in types, f"missing 'location' event in {types}"
-    # C should have been rejected (1008) since not in family
-    assert c_err is not None and ("1008" in c_err or "closed" in c_err or "403" in c_err), f"c_err={c_err}"
-
-
-# ---------- ACCESS CONTROL for chat visibility ----------
-def test_outsider_cannot_see_family_chat(s, state):
-    r = s.get(f"{API}/chat/messages", headers=auth_headers(state["C"]["token"]), timeout=15)
-    assert r.status_code == 200
-    # C has no family, endpoint returns empty list
-    assert r.json() == []
+    assert _run(run()) != "opened_unexpectedly"

@@ -18,7 +18,7 @@ import {
 const DEFAULT_COORDS = { lat: 37.7749, lng: -122.4194 };
 
 export default function MapHome() {
-  const { user, family, members, locations, places, sos, updateLocation, checkIn, showToast } = useApp();
+  const { user, family, members, locations, places, sos, updateLocation, checkIn, showToast, focusMemberId, focusMember } = useApp();
   const mapRef = useRef<FamMapHandle>(null);
   const [layer, setLayer] = useState<MapLayer>("hybrid");
   const [showLayers, setShowLayers] = useState(false);
@@ -27,6 +27,14 @@ export default function MapHome() {
   const [askBg, setAskBg] = useState(false);
   const [gpsBusy, setGpsBusy] = useState(false);
   const watchRef = useRef<Location.LocationSubscription | null>(null);
+
+  // Fly-to a member when Family tab requests it
+  useEffect(() => {
+    if (!focusMemberId) return;
+    const l = locations[focusMemberId];
+    if (l) mapRef.current?.flyTo(l.lat, l.lng, 17);
+    focusMember(null);
+  }, [focusMemberId, locations, focusMember]);
 
   // Kick off GPS on mount. NO simulation: if the user denies, we simply do not update.
   useEffect(() => {
