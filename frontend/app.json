@@ -10,7 +10,11 @@
     "newArchEnabled": true,
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.emergent.famraklive.uirq29"
+      "bundleIdentifier": "com.emergent.famraklive.uirq29",
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "Share your live location with family",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "Keep family updated in the background"
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -18,7 +22,11 @@
         "backgroundColor": "#000000"
       },
       "edgeToEdgeEnabled": true,
-      "package": "com.emergent.famraklive.uirq29"
+      "package": "com.emergent.famraklive.uirq29",
+      "permissions": [
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION"
+      ]
     },
     "web": {
       "bundler": "metro",
