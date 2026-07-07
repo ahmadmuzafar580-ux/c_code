@@ -1,20 +1,29 @@
 import { Stack } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
 import { useEffect } from "react";
-import { LogBox } from "react-native";
+import { LogBox, StyleSheet, View, Text } from "react-native";
+import { SafeAreaProvider } from "react-native-safe-area-context";
+import { GestureHandlerRootView } from "react-native-gesture-handler";
+import { StatusBar } from "expo-status-bar";
 
 import { useIconFonts } from "@/src/hooks/use-icon-fonts";
+import { AppProvider, useApp } from "@/src/lib/store";
+import { colors } from "@/src/lib/theme";
 
-
-// Disable logbox errors etc so that users can see the app
-// and agent works as expected.
-LogBox.ignoreAllLogs(true)
-
-// Keep the native splash visible from cold start until icon fonts register.
-// Required because @expo/vector-icons' componentDidMount fallback fires
-// Font.loadAsync against a broken vendor path if any <Icon> mounts before
-// the family is registered — which throws on Android Expo Go.
+LogBox.ignoreAllLogs(true);
 SplashScreen.preventAutoHideAsync();
+
+function ToastBar() {
+  const { toast } = useApp();
+  if (!toast) return null;
+  return (
+    <View pointerEvents="none" style={styles.toastWrap} testID="global-toast">
+      <View style={styles.toast}>
+        <Text style={styles.toastText}>{toast}</Text>
+      </View>
+    </View>
+  );
+}
 
 export default function RootLayout() {
   const [loaded, error] = useIconFonts();
@@ -25,9 +34,38 @@ export default function RootLayout() {
     }
   }, [loaded, error]);
 
-  // If the CDN is unreachable we fall through on error rather than wedging
-  // the app — icons will tofu, but the app still boots.
   if (!loaded && !error) return null;
 
-  return <Stack screenOptions={{ headerShown: false }} />;
+  return (
+    <GestureHandlerRootView style={{ flex: 1 }}>
+      <SafeAreaProvider>
+        <AppProvider>
+          <StatusBar style="dark" />
+          <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: colors.surface } }}>
+            <Stack.Screen name="index" />
+            <Stack.Screen name="(auth)" />
+            <Stack.Screen name="onboarding" />
+            <Stack.Screen name="(tabs)" />
+            <Stack.Screen name="invite" options={{ presentation: "modal" }} />
+            <Stack.Screen name="sos" options={{ presentation: "fullScreenModal", animation: "fade" }} />
+            <Stack.Screen name="add-place" options={{ presentation: "modal" }} />
+            <Stack.Screen name="places-list" />
+            <Stack.Screen name="history" options={{ presentation: "modal" }} />
+          </Stack>
+          <ToastBar />
+        </AppProvider>
+      </SafeAreaProvider>
+    </GestureHandlerRootView>
+  );
 }
+
+const styles = StyleSheet.create({
+  toastWrap: {
+    position: "absolute", top: 60, left: 0, right: 0, alignItems: "center", zIndex: 10000,
+  },
+  toast: {
+    backgroundColor: colors.surfaceInverse, paddingHorizontal: 16, paddingVertical: 10, borderRadius: 999,
+    shadowColor: "#000", shadowOpacity: 0.2, shadowRadius: 12, shadowOffset: { width: 0, height: 4 }, elevation: 6,
+  },
+  toastText: { color: colors.onSurfaceInverse, fontSize: 14, fontWeight: "600" },
+});
