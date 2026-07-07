@@ -67,6 +67,7 @@ class UserRegister(BaseModel):
     email: EmailStr
     password: str = Field(min_length=6)
     name: str = Field(min_length=1, max_length=64)
+    consent: bool = False  # user must accept T&C + Privacy Policy
 
 
 class UserLogin(BaseModel):
@@ -81,6 +82,18 @@ class UserPublic(BaseModel):
     avatar_url: Optional[str] = None
     family_id: Optional[str] = None
     role: str = "member"  # "owner" or "member"
+    sharing_enabled: bool = True
+    consented_at: Optional[str] = None
+    emergency_contacts: List[Dict[str, str]] = Field(default_factory=list)
+
+
+class SharingUpdate(BaseModel):
+    enabled: bool
+
+
+class EmergencyContact(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+    phone: str = Field(min_length=4, max_length=32)
 
 
 class AuthResponse(BaseModel):
@@ -102,6 +115,17 @@ class Family(BaseModel):
 
 class JoinFamilyReq(BaseModel):
     invite_code: str
+
+
+class JoinRequest(BaseModel):
+    id: str
+    family_id: str
+    user_id: str
+    user_name: str
+    user_email: EmailStr
+    status: str  # "pending" | "approved" | "rejected"
+    created_at: str
+    decided_at: Optional[str] = None
 
 
 class LocationUpdate(BaseModel):
@@ -232,6 +256,9 @@ async def get_current_user(creds: Optional[HTTPAuthorizationCredentials] = Depen
 
 
 def to_user_public(u: Dict[str, Any]) -> UserPublic:
+    consented_at = u.get("consented_at")
+    if consented_at and not isinstance(consented_at, str):
+        consented_at = iso(consented_at)
     return UserPublic(
         id=u["id"],
         email=u["email"],
@@ -239,6 +266,9 @@ def to_user_public(u: Dict[str, Any]) -> UserPublic:
         avatar_url=u.get("avatar_url"),
         family_id=u.get("family_id"),
         role=u.get("role", "member"),
+        sharing_enabled=u.get("sharing_enabled", True),
+        consented_at=consented_at,
+        emergency_contacts=u.get("emergency_contacts", []),
     )
 
 
@@ -278,10 +308,13 @@ async def root():
 
 @api_router.post("/auth/register", response_model=AuthResponse)
 async def register(body: UserRegister):
+    if not body.consent:
+        raise HTTPException(status_code=400, detail="You must accept the Privacy Policy and Terms to continue")
     existing = await db.users.find_one({"email": body.email.lower()})
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
     user_id = gen_id()
+    now = now_utc()
     doc = {
         "id": user_id,
         "email": body.email.lower(),
@@ -290,7 +323,10 @@ async def register(body: UserRegister):
         "avatar_url": None,
         "family_id": None,
         "role": "member",
-        "created_at": now_utc(),
+        "sharing_enabled": True,
+        "consented_at": now,
+        "emergency_contacts": [],
+        "created_at": now,
     }
     await db.users.insert_one(doc)
     token = create_token(user_id)
@@ -332,18 +368,111 @@ async def create_family(body: FamilyCreate, user=Depends(get_current_user)):
     return Family(id=fam_id, name=doc["name"], invite_code=code, owner_id=user["id"], created_at=iso(doc["created_at"]))
 
 
-@api_router.post("/family/join", response_model=Family)
-async def join_family(body: JoinFamilyReq, user=Depends(get_current_user)):
+@api_router.post("/family/join", response_model=Dict[str, Any])
+async def join_family_request(body: JoinFamilyReq, user=Depends(get_current_user)):
+    """Create a pending join request. Owner must approve before user gets access."""
     if user.get("family_id"):
         raise HTTPException(status_code=400, detail="Already in a family. Leave first.")
     fam = await db.families.find_one({"invite_code": body.invite_code.strip().upper()})
     if not fam:
         raise HTTPException(status_code=404, detail="Invalid invite code")
-    await db.users.update_one({"id": user["id"]}, {"$set": {"family_id": fam["id"], "role": "member"}})
-    return Family(
-        id=fam["id"], name=fam["name"], invite_code=fam["invite_code"],
-        owner_id=fam["owner_id"], created_at=iso(fam["created_at"]),
+    # Existing pending request?
+    existing = await db.join_requests.find_one({
+        "family_id": fam["id"], "user_id": user["id"], "status": "pending"
+    })
+    if existing:
+        return {"status": "pending", "family_name": fam["name"], "request_id": existing["id"]}
+    r_id = gen_id()
+    now = now_utc()
+    doc = {
+        "id": r_id,
+        "family_id": fam["id"],
+        "user_id": user["id"],
+        "user_name": user["name"],
+        "user_email": user["email"],
+        "status": "pending",
+        "created_at": now,
+        "decided_at": None,
+    }
+    await db.join_requests.insert_one(doc)
+    # Broadcast to the family owner's room (they'll see a request notification)
+    asyncio.create_task(manager.broadcast(fam["id"], {
+        "type": "join_request",
+        "data": {"id": r_id, "user_name": user["name"], "user_email": user["email"], "at": iso(now)},
+    }))
+    return {"status": "pending", "family_name": fam["name"], "request_id": r_id}
+
+
+@api_router.get("/family/join-requests", response_model=List[JoinRequest])
+async def list_join_requests(user=Depends(get_current_user)):
+    if not user.get("family_id"):
+        return []
+    fam = await db.families.find_one({"id": user["family_id"]})
+    if not fam or fam["owner_id"] != user["id"]:
+        raise HTTPException(status_code=403, detail="Only the family owner can view requests")
+    docs = await db.join_requests.find(
+        {"family_id": user["family_id"], "status": "pending"}, {"_id": 0}
+    ).sort("created_at", -1).to_list(100)
+    return [JoinRequest(**{**d, "created_at": iso(d["created_at"]),
+                           "decided_at": iso(d["decided_at"]) if d.get("decided_at") else None}) for d in docs]
+
+
+@api_router.get("/family/my-request", response_model=Optional[JoinRequest])
+async def my_pending_request(user=Depends(get_current_user)):
+    """Current user's most recent pending join request (for status display)."""
+    doc = await db.join_requests.find_one(
+        {"user_id": user["id"], "status": "pending"}, {"_id": 0}, sort=[("created_at", -1)]
     )
+    if not doc:
+        return None
+    return JoinRequest(**{**doc, "created_at": iso(doc["created_at"]),
+                          "decided_at": iso(doc["decided_at"]) if doc.get("decided_at") else None})
+
+
+@api_router.post("/family/join-requests/{req_id}/approve", response_model=Family)
+async def approve_join_request(req_id: str, user=Depends(get_current_user)):
+    req = await db.join_requests.find_one({"id": req_id})
+    if not req:
+        raise HTTPException(status_code=404, detail="Request not found")
+    fam = await db.families.find_one({"id": req["family_id"]})
+    if not fam or fam["owner_id"] != user["id"]:
+        raise HTTPException(status_code=403, detail="Only the family owner can approve")
+    if req["status"] != "pending":
+        raise HTTPException(status_code=400, detail="Request already decided")
+    # Ensure the requester isn't already in another family
+    requester = await db.users.find_one({"id": req["user_id"]})
+    if requester and requester.get("family_id"):
+        await db.join_requests.update_one({"id": req_id}, {"$set": {"status": "rejected", "decided_at": now_utc()}})
+        raise HTTPException(status_code=400, detail="User already joined a different family")
+    await db.users.update_one({"id": req["user_id"]}, {"$set": {"family_id": fam["id"], "role": "member"}})
+    await db.join_requests.update_one({"id": req_id}, {"$set": {"status": "approved", "decided_at": now_utc()}})
+    asyncio.create_task(manager.broadcast(fam["id"], {
+        "type": "join_approved",
+        "data": {"user_id": req["user_id"], "user_name": req["user_name"]},
+    }))
+    return Family(id=fam["id"], name=fam["name"], invite_code=fam["invite_code"],
+                  owner_id=fam["owner_id"], created_at=iso(fam["created_at"]))
+
+
+@api_router.post("/family/join-requests/{req_id}/reject")
+async def reject_join_request(req_id: str, user=Depends(get_current_user)):
+    req = await db.join_requests.find_one({"id": req_id})
+    if not req:
+        raise HTTPException(status_code=404, detail="Request not found")
+    fam = await db.families.find_one({"id": req["family_id"]})
+    if not fam or fam["owner_id"] != user["id"]:
+        raise HTTPException(status_code=403, detail="Only the family owner can reject")
+    await db.join_requests.update_one({"id": req_id}, {"$set": {"status": "rejected", "decided_at": now_utc()}})
+    return {"ok": True}
+
+
+@api_router.post("/family/my-request/cancel")
+async def cancel_my_request(user=Depends(get_current_user)):
+    await db.join_requests.update_many(
+        {"user_id": user["id"], "status": "pending"},
+        {"$set": {"status": "rejected", "decided_at": now_utc()}}
+    )
+    return {"ok": True}
 
 
 @api_router.get("/family", response_model=Family)
@@ -375,11 +504,119 @@ async def family_members(user=Depends(get_current_user)):
     return [to_user_public(m) for m in members]
 
 
+@api_router.delete("/family/members/{member_id}")
+async def remove_family_member(member_id: str, user=Depends(get_current_user)):
+    """Owner removes a member; user can remove themselves (same as leave)."""
+    if not user.get("family_id"):
+        raise HTTPException(status_code=400, detail="Not in a family")
+    fam = await db.families.find_one({"id": user["family_id"]})
+    if not fam:
+        raise HTTPException(status_code=404, detail="Family not found")
+    target = await db.users.find_one({"id": member_id})
+    if not target or target.get("family_id") != fam["id"]:
+        raise HTTPException(status_code=404, detail="Member not in this family")
+    is_owner = fam["owner_id"] == user["id"]
+    is_self = user["id"] == member_id
+    if not is_owner and not is_self:
+        raise HTTPException(status_code=403, detail="Only the family owner can remove other members")
+    if is_owner and is_self:
+        raise HTTPException(status_code=400, detail="Owner cannot remove self; transfer ownership or delete family instead")
+    # Remove
+    await db.users.update_one({"id": member_id}, {"$set": {"family_id": None, "role": "member"}})
+    # Purge their location + geofence state for this family
+    await db.locations.delete_many({"user_id": member_id})
+    await db.location_history.delete_many({"user_id": member_id, "family_id": fam["id"]})
+    await db.geofence_state.delete_one({"user_id": member_id})
+    asyncio.create_task(manager.broadcast(fam["id"], {
+        "type": "member_removed",
+        "data": {"user_id": member_id, "by": user["id"]},
+    }))
+    return {"ok": True}
+
+
+# ============ ROUTES: PRIVACY / ACCOUNT ============
+@api_router.put("/user/sharing", response_model=UserPublic)
+async def toggle_sharing(body: SharingUpdate, user=Depends(get_current_user)):
+    """Turn location sharing ON/OFF. When OFF the user's location is not
+    broadcast, not returned to family members, and updates are rejected."""
+    await db.users.update_one({"id": user["id"]}, {"$set": {"sharing_enabled": body.enabled}})
+    if not body.enabled and user.get("family_id"):
+        # Also purge latest location + notify family so they don't keep a stale pin.
+        await db.locations.delete_one({"user_id": user["id"]})
+        await db.geofence_state.delete_one({"user_id": user["id"]})
+        asyncio.create_task(manager.broadcast(user["family_id"], {
+            "type": "sharing_off",
+            "data": {"user_id": user["id"], "user_name": user["name"]},
+        }))
+    else:
+        asyncio.create_task(manager.broadcast(user.get("family_id") or "", {
+            "type": "sharing_on",
+            "data": {"user_id": user["id"], "user_name": user["name"]},
+        }))
+    fresh = await db.users.find_one({"id": user["id"]}, {"_id": 0, "password": 0})
+    return to_user_public(fresh)
+
+
+@api_router.put("/user/emergency-contacts", response_model=UserPublic)
+async def set_emergency_contacts(contacts: List[EmergencyContact], user=Depends(get_current_user)):
+    payload = [{"name": c.name.strip(), "phone": c.phone.strip()} for c in contacts[:10]]
+    await db.users.update_one({"id": user["id"]}, {"$set": {"emergency_contacts": payload}})
+    fresh = await db.users.find_one({"id": user["id"]}, {"_id": 0, "password": 0})
+    return to_user_public(fresh)
+
+
+@api_router.delete("/user/location-history")
+async def clear_my_location_history(user=Depends(get_current_user)):
+    """User can wipe their own location history at any time."""
+    res = await db.location_history.delete_many({"user_id": user["id"]})
+    await db.locations.delete_one({"user_id": user["id"]})
+    await db.geofence_state.delete_one({"user_id": user["id"]})
+    if user.get("family_id"):
+        asyncio.create_task(manager.broadcast(user["family_id"], {
+            "type": "history_cleared",
+            "data": {"user_id": user["id"]},
+        }))
+    return {"ok": True, "deleted": res.deleted_count}
+
+
+@api_router.delete("/user/account")
+async def delete_my_account(user=Depends(get_current_user)):
+    """Delete account and all associated data. If user is a family owner,
+    also disband the family and remove all members' family association."""
+    uid = user["id"]
+    fam_id = user.get("family_id")
+    # If owner, disband family
+    if fam_id:
+        fam = await db.families.find_one({"id": fam_id})
+        if fam and fam.get("owner_id") == uid:
+            await db.users.update_many({"family_id": fam_id}, {"$set": {"family_id": None, "role": "member"}})
+            await db.families.delete_one({"id": fam_id})
+            await db.places.delete_many({"family_id": fam_id})
+            await db.messages.delete_many({"family_id": fam_id})
+            await db.checkins.delete_many({"family_id": fam_id})
+            await db.sos_alerts.delete_many({"family_id": fam_id})
+            await db.join_requests.delete_many({"family_id": fam_id})
+            await db.location_history.delete_many({"family_id": fam_id})
+            asyncio.create_task(manager.broadcast(fam_id, {"type": "family_disbanded", "data": {}}))
+    # Delete user-owned data everywhere
+    await db.locations.delete_many({"user_id": uid})
+    await db.location_history.delete_many({"user_id": uid})
+    await db.geofence_state.delete_one({"user_id": uid})
+    await db.messages.delete_many({"user_id": uid})
+    await db.checkins.delete_many({"user_id": uid})
+    await db.sos_alerts.delete_many({"user_id": uid})
+    await db.join_requests.delete_many({"user_id": uid})
+    await db.users.delete_one({"id": uid})
+    return {"ok": True}
+
+
 # ============ ROUTES: LOCATION ============
 @api_router.post("/location/update", response_model=LocationPublic)
 async def update_location(body: LocationUpdate, user=Depends(get_current_user)):
     if not user.get("family_id"):
         raise HTTPException(status_code=400, detail="Join a family first")
+    if not user.get("sharing_enabled", True):
+        raise HTTPException(status_code=403, detail="Location sharing is off. Turn it on in Settings to share.")
     now = now_utc()
     doc = {
         "user_id": user["id"],
@@ -422,7 +659,14 @@ async def update_location(body: LocationUpdate, user=Depends(get_current_user)):
 async def get_family_locations(user=Depends(get_current_user)):
     if not user.get("family_id"):
         return []
-    docs = await db.locations.find({"family_id": user["family_id"]}, {"_id": 0}).to_list(200)
+    # Only include members with sharing enabled (self always visible to self)
+    members = await db.users.find(
+        {"family_id": user["family_id"]}, {"_id": 0, "id": 1, "sharing_enabled": 1}
+    ).to_list(200)
+    allowed_ids = [m["id"] for m in members if m["id"] == user["id"] or m.get("sharing_enabled", True)]
+    docs = await db.locations.find(
+        {"family_id": user["family_id"], "user_id": {"$in": allowed_ids}}, {"_id": 0}
+    ).to_list(200)
     return [
         LocationPublic(
             user_id=d["user_id"], lat=d["lat"], lng=d["lng"],
@@ -440,6 +684,9 @@ async def get_history(user_id: str, limit: int = 100, user=Depends(get_current_u
     target = await db.users.find_one({"id": user_id})
     if not target or target.get("family_id") != user["family_id"]:
         raise HTTPException(status_code=403, detail="Not a family member")
+    # Respect sharing preference: only allow self, or a member with sharing enabled
+    if user_id != user["id"] and not target.get("sharing_enabled", True):
+        raise HTTPException(status_code=403, detail="This member has paused location sharing")
     docs = await db.location_history.find({"user_id": user_id}, {"_id": 0}).sort("updated_at", -1).to_list(limit)
     return [
         LocationPublic(

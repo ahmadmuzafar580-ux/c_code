@@ -3,8 +3,10 @@ import { Image } from "expo-image";
 import { Ionicons } from "@expo/vector-icons";
 import { router } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { useEffect, useState } from "react";
 import { useApp } from "@/src/lib/store";
 import { avatarForUser, colors, radius, spacing, type } from "@/src/lib/theme";
+import { getSosSoundMode, setSosSoundMode, SosSoundMode } from "@/src/lib/sos-prefs";
 
 function Row({ icon, label, onPress, danger, testID }: { icon: any; label: string; onPress: () => void; danger?: boolean; testID?: string }) {
   return (
@@ -20,6 +22,16 @@ function Row({ icon, label, onPress, danger, testID }: { icon: any; label: strin
 
 export default function SettingsScreen() {
   const { user, family, logout, leaveFamily } = useApp();
+  const [sosMode, setSosMode] = useState<SosSoundMode>("loud");
+  useEffect(() => { (async () => setSosMode(await getSosSoundMode()))(); }, []);
+
+  const cycleSosMode = async () => {
+    const order: SosSoundMode[] = ["loud", "vibrate", "silent"];
+    const next = order[(order.indexOf(sosMode) + 1) % order.length];
+    setSosMode(next); await setSosSoundMode(next);
+  };
+  const modeLabel = sosMode === "loud" ? "Loud alarm" : sosMode === "vibrate" ? "Vibrate only" : "Silent";
+  const modeIcon: any = sosMode === "loud" ? "volume-high" : sosMode === "vibrate" ? "phone-portrait" : "volume-mute";
 
   return (
     <SafeAreaView edges={["top"]} style={styles.root} testID="settings-screen">
@@ -46,6 +58,15 @@ export default function SettingsScreen() {
         <Text style={styles.section}>Safety</Text>
         <View style={styles.card}>
           <Row icon="warning-outline" label="Trigger SOS" onPress={() => router.push("/sos")} testID="settings-sos" danger />
+          <View style={styles.divider} />
+          <Pressable style={styles.row} onPress={cycleSosMode} testID="settings-sos-sound">
+            <View style={styles.rowIcon}><Ionicons name={modeIcon} size={18} color={colors.brandPrimary} /></View>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.rowLabel}>SOS alarm sound</Text>
+              <Text style={styles.rowSub}>{modeLabel}</Text>
+            </View>
+            <Ionicons name="chevron-forward" size={18} color={colors.onSurfaceTertiary} />
+          </Pressable>
         </View>
 
         <Text style={styles.section}>Account</Text>
@@ -77,6 +98,7 @@ const styles = StyleSheet.create({
   row: { flexDirection: "row", alignItems: "center", padding: spacing.md, gap: spacing.md },
   rowIcon: { width: 36, height: 36, borderRadius: radius.md, backgroundColor: colors.brandTertiary, alignItems: "center", justifyContent: "center" },
   rowLabel: { flex: 1, color: colors.onSurface, fontWeight: "600", fontSize: type.lg },
+  rowSub: { color: colors.onSurfaceTertiary, fontSize: type.sm, marginTop: 2 },
   divider: { height: 1, backgroundColor: colors.border, marginLeft: 60 },
   appVersion: { textAlign: "center", color: colors.onSurfaceTertiary, marginTop: spacing["2xl"] },
 });
