@@ -12,8 +12,10 @@
       "supportsTablet": true,
       "bundleIdentifier": "com.emergent.famraklive.uirq29",
       "infoPlist": {
-        "NSLocationWhenInUseUsageDescription": "Share your live location with family",
-        "NSLocationAlwaysAndWhenInUseUsageDescription": "Keep family updated in the background"
+        "NSLocationWhenInUseUsageDescription": "Share your precise location with your family in real time.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "Keep sharing your location in the background so your family stays updated even when Famrak is closed.",
+        "NSLocationAlwaysUsageDescription": "Keep sharing your location in the background so your family stays updated.",
+        "UIBackgroundModes": ["location", "fetch"]
       }
     },
     "android": {
@@ -25,7 +27,10 @@
       "package": "com.emergent.famraklive.uirq29",
       "permissions": [
         "ACCESS_FINE_LOCATION",
-        "ACCESS_COARSE_LOCATION"
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_BACKGROUND_LOCATION",
+        "FOREGROUND_SERVICE",
+        "FOREGROUND_SERVICE_LOCATION"
       ]
     },
     "web": {
@@ -44,7 +49,16 @@
           "backgroundColor": "#000000"
         }
       ],
-      "expo-audio"
+      "expo-audio",
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "Famrak uses your precise location to share it with your approved family members in real time, including when the app is in the background.",
+          "locationWhenInUsePermission": "Famrak uses your precise location to share it with your approved family members.",
+          "isAndroidBackgroundLocationEnabled": true,
+          "isAndroidForegroundServiceEnabled": true
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true
